@@ -1,0 +1,1 @@
+experiments/train_flows/train_semisup_cons.py --dataset=MNIST --data_path=data/images/mnist/ --label_path=data/labels/mnist/100_balanced_labels/10.npz --batch_size=16 --logdir=log_mnist --ckptdir=chk_mnist --save_freq=5000 --num_epochs=30001 --label_weight=3 --consistency_weight=1. --consistency_rampup=1000 --lr=1e-5 --eval_freq=100
