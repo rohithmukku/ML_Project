@@ -63,6 +63,31 @@ class ResidualFlow(FlowNetwork):
         return super().nll(x)
     def forward(self,x):
         return self.nll(x)
+
+@export
+class MNISTResidualFlow(FlowNetwork):
+    def __init__(self, in_channels=1, num_classes=2, k=512,num_per_block=16):
+        super().__init__()
+        self.num_classes = num_classes
+        self.flow = iSequential(
+            #iLogits(),
+            SqueezeLayer(),
+            *[iResBlockConv(in_channels*4,k) for i in range(num_per_block)],
+            SqueezeLayer(),
+            *[iResBlockConv(in_channels*16,k) for i in range(num_per_block)],
+            SqueezeLayer(),
+            *[iResBlockConv(in_channels*64,k) for i in range(num_per_block)],
+            Flatten(),
+            *[iResBlockLinear(1*32*32,k//4) for i in range(4)],
+        )
+        self.k = k
+        self.prior = lambda device: StandardNormal(1*32*32,device)
+
+    def nll(self,x):
+        x.requires_grad = True
+        return super().nll(x)
+    def forward(self,x):
+        return self.nll(x)
 # class iResBlock(nn.Module):
 #     def __init__(self,in_channels,out_channels,ksize=3,drop_rate=0,stride=1,
 #                     inverse_tol=1e-7,sigma=1.,**kwargs):
