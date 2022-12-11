@@ -3,7 +3,11 @@ import sys
 import os
 import flow_ssl
 from torchvision.datasets import SVHN, MNIST, FashionMNIST, CIFAR10
-
+import torch.optim as optim
+import torchvision
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 import torchvision.transforms as transforms
 import torch
 from torch.utils.data.sampler import Sampler
@@ -11,15 +15,9 @@ import numpy as np
 import itertools
 import random
 import argparse
-
-
-from experiments.train_flows.utils import train_utils, optim_util
-
+from experiments.train_flows.utils import train_utils, optim_util, norm_util, shell_util
 from scipy.spatial.distance import cdist
-
-from experiments.train_flows.utils import shell_util
-
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import torch.nn as nn
 import math
 import torch.nn.init as init
@@ -29,7 +27,7 @@ from flow_ssl.distributions import SSLGaussMixture
 from flow_ssl import FlowLoss
 from tensorboardX import SummaryWriter
 
-root = "/mnt/c/Users/gyane/Projects/"
+root = "/scratch/rm5708/ml/ML_Project/"
 
 sys.path.append(os.path.join(root, 'flowgmm-public'))
 
@@ -37,18 +35,18 @@ data_dir = os.path.join(root, 'data')
 
 parser = argparse.ArgumentParser(description='Run custom flow datasets for OOD')
 
-parser.add_argument('--indata_size', type=int, default=50000)
-parser.add_argument('--outdata_size', type=int, default=18000)
-parser.add_argument('--label_ratio', type=float, default=0.2)
-parser.add_argument('--batch_size', type=int, default=64)
+parser.add_argument('--indata_size', type=int, default=30000)
+parser.add_argument('--outdata_size', type=int, default=10000)
+parser.add_argument('--label_ratio', type=float, default=0.02)
+parser.add_argument('--batch_size', type=int, default=128)
 
-parser.add_argument('--in_data', default="mnist")
-parser.add_argument('--out_data', default="svhn,fashionmnist,cifar")
+parser.add_argument('--in_data', default="cifar")
+parser.add_argument('--out_data', default="svhn,fashionmnist,mnist")
 
 parser.add_argument('--test_out_data', default="svhn,fashionmnist,cifar") #could be extra as well
 
-parser.add_argument('--test_indata_size', type=int, default=10000)
-parser.add_argument('--test_outdata_size', type=int, default=3000)
+parser.add_argument('--test_indata_size', type=int, default=900)
+parser.add_argument('--test_outdata_size', type=int, default=300)
 
 args = parser.parse_args()
 
@@ -67,19 +65,36 @@ test_outdata_size = args.test_outdata_size
 
 print(args)
 
-class Dataset():
+def sample(net, prior, batch_size, cls, device, sample_shape):
+    """Sample from RealNVP model.
+    Args:
+        net (torch.nn.DataParallel): The RealNVP model wrapped in DataParallel.
+        batch_size (int): Number of samples to generate.
+        device (torch.device): Device to use.
+    """
+    with torch.no_grad():
+        if cls is not None:
+            z = prior.sample((batch_size,), gaussian_id=cls)
+        else:
+            z = prior.sample((batch_size,))
+        x = net.inverse(z)
+
+        return x
+
+class SSLDataset():
     def __init__(self, config: dict):
+        self.data_keys = set(['mnist', 'fashionmnist', 'cifar', 'svhn'])
         self.config = config
         self.labeled_ids = []
         self.unlabeled_ids = []
         self.image_tensors = []
         self.labels = []
     
-    def prepare(self, in_data='mnist', out_data=None, indata_size=50000, outdata_size=18000, label_ratio=0.2):
-        print(in_data)
-        print(out_data)
+    def prepare(self, in_data='mnist', indata_size=5000, outdata_size=1700, label_ratio=0.1):
+        # print(self.data_keys)
+        self.data_keys.remove(in_data)
         # Prepare OOD data
-        for k in out_data:
+        for k in self.data_keys:
             dataset = config[k]['dataset']
             transforms = config[k]['transforms']
             start_id = len(self.labels)
@@ -93,8 +108,6 @@ class Dataset():
             self.labels += [-1] * (int((1 - label_ratio) * outdata_size))
             self.labeled_ids += range(start_id, end_id)
             self.unlabeled_ids += range(end_id, len(self.labels))
-        
-        # print(self.labeled_ids)
         
         # Prepare ID data
         dataset = config[in_data]['dataset']
@@ -122,6 +135,42 @@ class Dataset():
         unlabeled_id = self.unlabeled_ids[idx % len(self.unlabeled_ids)]
         return self.image_tensors[labeled_id], self.image_tensors[unlabeled_id], self.labels[labeled_id]
 
+class SLDataset():
+    def __init__(self, config: dict):
+        self.data_keys = set(['mnist', 'fashionmnist', 'cifar', 'svhn'])
+        self.config = config
+        self.image_tensors = []
+        self.labels = []
+    
+    def prepare(self, in_data='mnist', indata_size=600, outdata_size=200):
+        # print(self.data_keys)
+        self.data_keys.remove(in_data)
+        # Prepare OOD data
+        for k in self.data_keys:
+            dataset = config[k]['dataset']
+            transforms = config[k]['transforms']
+            for i, (img, _) in enumerate(dataset):
+                if i == outdata_size:
+                    break
+                img_tensor = transforms(img)
+                self.image_tensors.append(img_tensor)
+            self.labels += [0] * outdata_size
+        
+        # Prepare ID data
+        dataset = config[in_data]['dataset']
+        transforms = config[in_data]['transforms']
+        for i, (img, _) in enumerate(dataset):
+            if i == indata_size:
+                break
+            img_tensor = transforms(img)
+            self.image_tensors.append(img_tensor)
+        self.labels += [1] * indata_size
+    
+    def __len__(self):
+        return len(self.image_tensors)
+    
+    def __getitem__(self, idx):
+        return self.image_tensors[idx], self.labels[idx]
 
 class LabeledUnlabeledBatchSampler(Sampler):
     """Minibatch index sampler for labeled and unlabeled indices. 
@@ -252,36 +301,25 @@ test_config['cifar']['dataset'] = cifar_test_dataset
 test_config['cifar']['transforms'] = cifar_transforms
 
 
-ds = Dataset(config)
-ds.prepare(in_data=in_data, out_data=out_data, indata_size=indata_size, outdata_size=outdata_size, label_ratio=label_ratio)
-
-test_ds = Dataset(test_config)
-test_ds.prepare(in_data=in_data, out_data=test_out_data, indata_size=test_indata_size, outdata_size=test_outdata_size, label_ratio=1)
-
+ds = SSLDataset(config)
+ds.prepare(in_data=in_data, indata_size=indata_size, outdata_size=outdata_size, label_ratio=label_ratio)
 
 train_batch_sampler = LabeledUnlabeledBatchSampler(ds.labeled_ids, ds.unlabeled_ids, batch_size//2, batch_size//2)
-test_batch_sampler = LabeledUnlabeledBatchSampler(test_ds.labeled_ids, test_ds.unlabeled_ids, batch_size//2, 0)
-
 trainloader = torch.utils.data.DataLoader(ds, batch_sampler=train_batch_sampler, pin_memory=True)
-testloader = torch.utils.data.DataLoader(test_ds, batch_sampler=test_batch_sampler, pin_memory=True)
 
-
-for batch in trainloader:
-    print(batch[0].get_device())
-    print(batch[1].shape)
-    print(batch[2].shape)
-    break
-
+# for batch in trainloader:
+#     print(batch[0].get_device())
+#     print(batch[1].shape)
+#     print(batch[2].shape)
+#     break
 
 img_shape = (1, 32, 32)
 flow = 'MNISTResidualFlow'
 model_cfg = getattr(flow_ssl, flow)
 net = model_cfg(in_channels=img_shape[0], num_classes=2)
 
-
 if flow in ["iCNN3d", "iResnetProper","SmallResidualFlow","ResidualFlow","MNISTResidualFlow"]:
     net = net.flow
-
 
 means = 'random'
 means_r = 1.0
@@ -316,26 +354,16 @@ prior.weights.requires_grad = weights_trainable
 prior.inv_cov_stds.requires_grad = covs_trainable
 loss_fn = FlowLoss(prior)
 
-
-from experiments.train_flows.utils import norm_util
-import torch.optim as optim
-
 param_groups = norm_util.get_param_groups(net, 0.0, norm_suffix='weight_g')
 
 optimizer = optim.Adam(param_groups, lr=1e-3)
 opt_gmm = optim.Adam([prior.means, prior.weights, prior.inv_cov_stds], lr=1e-4, weight_decay=0.)
 
-
-
-
-
 writer = SummaryWriter(log_dir='./')
 device = 'cuda' if torch.cuda.is_available() and len([0]) > 0 else 'cpu'
 start_epoch = 0
 
-
 total_labels = len(ds.labeled_ids)
-
 
 def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
           label_weight, max_grad_norm, consistency_weight,
@@ -350,7 +378,7 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
     jaclogdet_meter = shell_util.AverageMeter()
     acc_meter = shell_util.AverageMeter()
     acc_all_meter = shell_util.AverageMeter()
-    with tqdm(total=total_labels) as progress_bar:
+    with tqdm(total=2*total_labels) as progress_bar:
         for x1, x2, y in trainloader:
 
             x1 = x1.to(device)
@@ -433,9 +461,90 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
     writer.add_scalar("train/jaclogdet", jaclogdet_meter.avg, epoch)
     writer.add_scalar("train/acc", acc_meter.avg, epoch)
     writer.add_scalar("train/acc_all", acc_all_meter.avg, epoch)
-    writer.add_scalar("train/bpd", utils.bits_per_dim(x1, loss_unsup_meter.avg), epoch)
+    writer.add_scalar("train/bpd", optim_util.bits_per_dim(x1, loss_unsup_meter.avg), epoch)
     writer.add_scalar("train/loss_consistency", loss_consistency_meter.avg, epoch)
 
+
+def test_classifier(epoch, net, testloader, device, loss_fn, writer=None, postfix="",
+                    show_classification_images=False, confusion=False):
+    net.eval()
+    loss_meter = shell_util.AverageMeter()
+    jaclogdet_meter = shell_util.AverageMeter()
+    acc_meter = shell_util.AverageMeter()
+    all_pred_labels = []
+    all_xs = []
+    all_ys = []
+    all_zs = []
+    with torch.no_grad():
+        with tqdm(total=len(testloader.dataset)) as progress_bar:
+            for x, y in testloader:
+                all_xs.append(x.data.numpy())
+                all_ys.append(y.data.numpy())
+                x = x.to(device)
+                y = y.to(device)
+                z = net(x)
+                all_zs.append(z.cpu().data.numpy())
+                sldj = net.logdet()
+                loss = loss_fn(z, y=y, sldj=sldj)
+                loss_meter.update(loss.item(), x.size(0))
+                jaclogdet_meter.update(sldj.mean().item(), x.size(0))
+
+                preds = loss_fn.prior.classify(z.reshape((len(z), -1)))
+                preds = preds.reshape(y.shape)
+                all_pred_labels.append(preds.cpu().data.numpy())
+                acc = (preds == y).float().mean().item()
+                acc_meter.update(acc, x.size(0))
+
+                progress_bar.set_postfix(loss=loss_meter.avg,
+                                     bpd=optim_util.bits_per_dim(x, loss_meter.avg),
+                                     acc=acc_meter.avg)
+                progress_bar.update(x.size(0))
+    all_pred_labels = np.hstack(all_pred_labels)
+    all_xs = np.vstack(all_xs)
+    all_zs = np.vstack(all_zs)
+    all_ys = np.hstack(all_ys)
+
+    if writer is not None:
+        writer.add_scalar("test/loss{}".format(postfix), loss_meter.avg, epoch)
+        writer.add_scalar("test/acc{}".format(postfix), acc_meter.avg, epoch)
+        writer.add_scalar("test/bpd{}".format(postfix), optim_util.bits_per_dim(x, loss_meter.avg), epoch)
+        writer.add_scalar("test/jaclogdet{}".format(postfix), jaclogdet_meter.avg, epoch)
+
+        for cls in range(np.max(all_pred_labels)+1):
+            num_imgs_cls = (all_pred_labels==cls).sum()
+            writer.add_scalar("test_clustering/num_class_{}_{}".format(cls,postfix), 
+                    num_imgs_cls, epoch)
+            if num_imgs_cls == 0:
+                writer.add_scalar("test_clustering/num_class_{}_{}".format(cls,postfix), 
+                    0., epoch)
+                continue
+            writer.add_histogram('label_distributions/num_class_{}_{}'.format(cls,postfix), 
+                    all_ys[all_pred_labels==cls], epoch)
+
+            writer.add_histogram(
+                'distance_distributions/num_class_{}'.format(cls),
+                torch.norm(torch.tensor(all_zs[all_pred_labels==cls]) - loss_fn.prior.means[cls].cpu(), p=2, dim=1),
+                epoch
+            )
+
+            if show_classification_images:
+                images_cls = all_xs[all_pred_labels==cls][:10]
+                images_cls = torch.from_numpy(images_cls).float()
+                images_cls_concat = torchvision.utils.make_grid(
+                        images_cls, nrow=2, padding=2, pad_value=255)
+                writer.add_image("test_clustering/class_{}".format(cls), 
+                        images_cls_concat)
+
+        if confusion:
+            fig = plt.figure(figsize=(8, 8))
+            cm = confusion_matrix(all_ys, all_pred_labels)
+            cm = np.around(cm.astype('float') / cm.sum(axis=1)[:, np.newaxis], decimals=2)
+            sns.heatmap(cm, annot=True, cmap=plt.cm.Blues)
+            plt.ylabel('True label')
+            plt.xlabel('Predicted label')
+            conf_img = torch.tensor(np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep=''))
+            conf_img = torch.tensor(conf_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))).transpose(0, 2).transpose(1, 2)
+            writer.add_image("confusion", conf_img, epoch)
 
 
 NO_LABEL = -1
@@ -449,7 +558,7 @@ label_weight = 1.0
 max_grad_norm = 100.0
 save_freq = 2
 ckptdir = './'
-eval_freq = 1
+eval_freq = 2
 confusion = True
 num_samples = 50
 
@@ -471,7 +580,7 @@ for epoch in range(start_epoch, n_epochs):
           writer, use_unlab=True)
 
     # Save checkpoint
-    if (epoch % save_freq == 0):
+    if (epoch % save_freq == 1):
         print('Saving...')
         state = {
             'net': net.state_dict(),
@@ -482,17 +591,15 @@ for epoch in range(start_epoch, n_epochs):
         torch.save(state, os.path.join(ckptdir, str(epoch)+'.pt'))
 
     # Save samples and data
-    if epoch % eval_freq == 0:
-        train_utils.test_classifier(epoch, net, testloader, device, loss_fn, writer, confusion=confusion)
-        # if args.swa:
-        #     optimizer.swap_swa_sgd() 
-        #     print("updating bn")
-        #     SWA.bn_update(bn_loader, net)
-        #     utils.test_classifier(epoch, net, testloader, device, loss_fn, 
-        #             writer, postfix="_swa")
+    if epoch % eval_freq == 1:
+    
+        test_ds = SLDataset(test_config)
+        test_ds.prepare(in_data=in_data, indata_size=test_indata_size, outdata_size=test_outdata_size)
+        testloader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+        test_classifier(epoch, net, testloader, device, loss_fn, writer, confusion=confusion)
 
         z_means = prior.means
-        data_means = net.module.inverse(z_means)
+        data_means = net.inverse(z_means)
         z_mean_imgs = torchvision.utils.make_grid(
                 z_means.reshape((n_classes, *img_shape)), nrow=2)
         data_mean_imgs = torchvision.utils.make_grid(
@@ -518,7 +625,7 @@ for epoch in range(start_epoch, n_epochs):
 
         images = []
         for i in range(n_classes):
-            images_cls = utils.sample(net, loss_fn.prior, num_samples // n_classes,
+            images_cls = sample(net, loss_fn.prior, num_samples // n_classes,
                                       cls=i, device=device, sample_shape=img_shape)
             images.append(images_cls)
             images_cls_concat = torchvision.utils.make_grid(
@@ -530,6 +637,3 @@ for epoch in range(start_epoch, n_epochs):
         os.makedirs(ckptdir, exist_ok=True)
         torchvision.utils.save_image(images_concat, 
                                     os.path.join(ckptdir, 'samples/epoch_{}.png'.format(epoch)))
-
-
-s = iter(trainloader)
