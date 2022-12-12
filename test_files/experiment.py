@@ -3,7 +3,7 @@ import sys
 import os
 import flow_ssl
 from torchvision.datasets import SVHN, MNIST, FashionMNIST, CIFAR10, CelebA, Omniglot
-from torchvision.datasets import STL10, Food101, Caltech101, GTSRB, Flowers102
+from torchvision.datasets import STL10, Food101, Caltech101, GTSRB, Flowers102, KMNIST, CIFAR100
 
 import torchvision
 import torchvision.transforms as transforms
@@ -344,13 +344,15 @@ food_dataset = Food101(root=data_dir, download = True)
 flowers_dataset = Flowers102(root=data_dir, download = True)
 caltech_dataset = Caltech101(root=data_dir, download = True)
 german_sign_dataset = GTSRB(root=data_dir, download = True)
+omniglot_dataset = Omniglot(root=data_dir, download = True)
+
 
 
 # load test datasets from pytorch
 
 svhn_test_dataset = SVHN(root=data_dir, split='test', download=True)
 mnist_test_dataset = MNIST(root=data_dir, train=False, download=True)
-kmnist_test_dataset = KMNIST(root=data_dir, train=False download=True)
+kmnist_test_dataset = KMNIST(root=data_dir, train=False, download=True)
 fashionmnist_test_dataset = FashionMNIST(root=data_dir, train=False, download=True)
 cifar_test_dataset = CIFAR10(root=data_dir, train=False, download=True)
 cifar100_test_dataset = CIFAR100(root=data_dir, train=False, download=True)
@@ -360,7 +362,7 @@ food_test_dataset = Food101(root=data_dir, split='test', download = True)
 flowers_test_dataset = Flowers102(root=data_dir, split='test', download = True)
 caltech_test_dataset = Caltech101(root=data_dir, download = True)
 german_sign_test_dataset = GTSRB(root=data_dir, split='test', download = True)
-
+omniglot_test_dataset = Omniglot(root=data_dir, download = True)
 
 # create train config, to be used in the 
 # training dataset, composed of images from various sources
@@ -411,6 +413,9 @@ config['german_sign'] = {}
 config['german_sign']['dataset'] = german_sign_dataset
 config['german_sign']['transforms'] = german_sign_transforms
 
+config['omniglot'] = {}
+config['omniglot']['dataset'] = omniglot_dataset
+config['omniglot']['transforms'] = german_sign_transforms
 
 # write test_config, to be used in the test data
 
@@ -460,6 +465,9 @@ test_config['german_sign'] = {}
 test_config['german_sign']['dataset'] = german_sign_test_dataset
 test_config['german_sign']['transforms'] = german_sign_transforms
 
+test_config['omniglot'] = {}
+test_config['omniglot']['dataset'] = omniglot_test_dataset
+test_config['omniglot']['transforms'] = german_sign_transforms
 
 # define LDAM loss for skewed data
 
@@ -509,39 +517,40 @@ testloader = torch.utils.data.DataLoader(test_ds, batch_size, shuffle=True, pin_
 total_labels = len(ds.labeled_ids)
 # test dataloaders
 
-#for batch in trainloader:
-#    print(batch[0][0].shape)
-#    print(batch[0][1].shape)
-#    print(batch[1].shape)
-#    break
+for batch in trainloader:
+    print(batch[0][0].shape)
+    print(batch[0][1].shape)
+    print(batch[1].shape)
+    break
 
-#for batch in testloader:
-#    print(len(batch))
-#    print(batch[0].get_device())
-#    print(batch[0].shape)
-#    print(batch[1].shape)
-#    break
+for batch in testloader:
+    print(len(batch))
+    print(batch[0].get_device())
+    print(batch[0].shape)
+    print(batch[1].shape)
+    break
 
 
 # decide based on channels of dataset
 
-if in_data in ['mnist','fashionmnist','svhn']:
-    img_shape = (1, 32, 32)
-    flow = 'MNISTResidualFlow'
-    model_cfg = getattr(flow_ssl, flow)
-    net = model_cfg(in_channels=img_shape[0], num_classes=2)
+#if in_data in ['mnist','fashionmnist','svhn']:
+#    img_shape = (1, 32, 32)
+#    flow = 'MNISTResidualFlow'
+#    model_cfg = getattr(flow_ssl, flow)
+#    net = model_cfg(in_channels=img_shape[0], num_classes=2)
 
-else:
-    img_shape = (3, 32, 32)
-    flow = 'ResidualFlow'
-    model_cfg = getattr(flow_ssl, flow)
-    net = model_cfg(in_channels=img_shape[0], num_classes=2)
+#else:
+img_shape = (3, 32, 32)
+flow = 'ResidualFlow'
+model_cfg = getattr(flow_ssl, flow)
+net = model_cfg(in_channels=img_shape[0], num_classes=2)
 
 if flow in ["iCNN3d", "iResnetProper","SmallResidualFlow","ResidualFlow","MNISTResidualFlow"]:
     net = net.flow
 
 print(args)
 print(img_shape)
+print(flow)
 
 # initialize means and priors
 
