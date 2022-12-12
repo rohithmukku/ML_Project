@@ -48,12 +48,15 @@ parser.add_argument('--indata_size', type=int, default=50000)
 parser.add_argument('--outdata_size', type=int, default=18000)
 parser.add_argument('--label_ratio', type=float, default=0.2)
 parser.add_argument('--batch_size', type=int, default=64)
+parser.add_argument('--save_freq', type=int, default=2)
+parser.add_argument('--eval_freq', type=int, default=2)
+parser.add_argument('--n_epochs', type=int, default=10)
 parser.add_argument('--root_path')
 
 parser.add_argument('--in_data', default="cifar")
 parser.add_argument('--out_data', default="svhn,fashionmnist,mnist")
 
-parser.add_argument('--test_out_data', default="svhn,fashionmnist,mnist") #could be extra as well
+parser.add_argument('--test_out_data', default=None) #could be extra as well
 
 parser.add_argument('--test_indata_size', type=int, default=900)
 parser.add_argument('--test_outdata_size', type=int, default=300)
@@ -69,9 +72,12 @@ label_ratio = args.label_ratio
 batch_size = args.batch_size
 
 in_data = args.in_data
-out_data = set(args.out_data.split(','))
+out_data = args.out_data.split(',')
 
-test_out_data = set(args.test_out_data.split(','))
+if not args.test_out_data:
+    test_out_data = out_data
+else:
+    test_out_data = args.test_out_data.split(',')
 test_indata_size = args.test_indata_size
 test_outdata_size = args.test_outdata_size
 
@@ -300,7 +306,7 @@ stl10_transforms = transforms.Compose([
                     transform_to_three_channel
                 ])
 german_sign_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4)
+                    transforms.RandomCrop(32, padding=4),
                     # transforms.Grayscale(),
                     transforms.ToTensor(),
                     transforms.Resize((32,32)),
@@ -327,8 +333,10 @@ flowers_transforms = transforms.Compose([
 
 svhn_dataset = SVHN(root=data_dir, split='train', download=True)
 mnist_dataset = MNIST(root=data_dir, download=True)
+kmnist_dataset = KMNIST(root=data_dir, download=True)
 fashionmnist_dataset = FashionMNIST(root=data_dir, download=True)
 cifar_dataset = CIFAR10(root=data_dir, download=True)
+cifar100_dataset = CIFAR100(root=data_dir, download=True)
 stl10_dataset = STL10(root=data_dir, split='train', download=True)
 food_dataset = Food101(root=data_dir, download = True)
 # celeb_dataset = CelebA(root=data_dir, download = True)
@@ -341,8 +349,10 @@ german_sign_dataset = GTSRB(root=data_dir, download = True)
 
 svhn_test_dataset = SVHN(root=data_dir, split='test', download=True)
 mnist_test_dataset = MNIST(root=data_dir, train=False, download=True)
+kmnist_test_dataset = KMNIST(root=data_dir, train=False download=True)
 fashionmnist_test_dataset = FashionMNIST(root=data_dir, train=False, download=True)
 cifar_test_dataset = CIFAR10(root=data_dir, train=False, download=True)
+cifar100_test_dataset = CIFAR100(root=data_dir, train=False, download=True)
 stl10_test_dataset = STL10(root=data_dir, split='test', download=True)
 food_test_dataset = Food101(root=data_dir, split='test', download = True)
 # celeb_dataset = CelebA(root=data_dir, download = True)
@@ -364,6 +374,10 @@ config['mnist'] = {}
 config['mnist']['dataset'] = mnist_dataset
 config['mnist']['transforms'] = mnist_transforms
 
+config['kmnist'] = {}
+config['kmnist']['dataset'] = kmnist_dataset
+config['kmnist']['transforms'] = mnist_transforms
+
 config['fashionmnist'] = {}
 config['fashionmnist']['dataset'] = fashionmnist_dataset
 config['fashionmnist']['transforms'] = fashionmnist_transforms
@@ -371,6 +385,10 @@ config['fashionmnist']['transforms'] = fashionmnist_transforms
 config['cifar'] = {}
 config['cifar']['dataset'] = cifar_dataset
 config['cifar']['transforms'] = cifar_transforms
+
+config['cifar100'] = {}
+config['cifar100']['dataset'] = cifar100_dataset
+config['cifar100']['transforms'] = cifar_transforms
 
 config['food'] = {}
 config['food']['dataset'] = food_dataset
@@ -405,6 +423,10 @@ test_config['mnist'] = {}
 test_config['mnist']['dataset'] = mnist_test_dataset
 test_config['mnist']['transforms'] = mnist_transforms
 
+test_config['kmnist'] = {}
+test_config['kmnist']['dataset'] = kmnist_test_dataset
+test_config['kmnist']['transforms'] = mnist_transforms
+
 test_config['fashionmnist'] = {}
 test_config['fashionmnist']['dataset'] = fashionmnist_test_dataset
 test_config['fashionmnist']['transforms'] = fashionmnist_transforms
@@ -412,6 +434,10 @@ test_config['fashionmnist']['transforms'] = fashionmnist_transforms
 test_config['cifar'] = {}
 test_config['cifar']['dataset'] = cifar_test_dataset
 test_config['cifar']['transforms'] = cifar_transforms
+
+test_config['cifar100'] = {}
+test_config['cifar100']['dataset'] = cifar100_test_dataset
+test_config['cifar100']['transforms'] = cifar_transforms
 
 test_config['food'] = {}
 test_config['food']['dataset'] = food_test_dataset
@@ -557,8 +583,10 @@ param_groups = norm_util.get_param_groups(net, 0.0, norm_suffix='weight_g')
 optimizer = optim.Adam(param_groups, lr=5e-4, weight_decay=1e-2)
 opt_gmm = optim.Adam([prior.means, prior.weights, prior.inv_cov_stds], lr=1e-4, weight_decay=1e-2)
 
-
-writer = SummaryWriter(log_dir='./')
+log_directory = f'./{in_data}_{",".join(out_data)}_{label_ratio}'
+print(log_directory)
+os.mkdir(log_directory)
+writer = SummaryWriter(log_dir=log_directory)
 device = 'cuda' if torch.cuda.is_available() and len([0]) > 0 else 'cpu'
 start_epoch = 0
 
@@ -785,7 +813,7 @@ def sample(net, prior, batch_size, cls, device, sample_shape):
 
 NO_LABEL = -1
 schedule = None
-n_epochs = 10
+n_epochs = args.n_epochs
 lr = 5e-4
 lr_gmm = 1e-4
 consistency_weight = 0.01
@@ -793,9 +821,9 @@ consistency_rampup = 1
 label_weight = 1.0
 max_grad_norm = 100.0
 # need to feed this as args
-save_freq = 2
-ckptdir = './'
-eval_freq = 2
+ckptdir = f'./{in_data}_{",".join(out_data)}_{label_ratio}'
+save_freq = args.save_freq
+eval_freq = args.eval_freq
 confusion = True
 num_samples = 50
 
