@@ -51,6 +51,7 @@ parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--save_freq', type=int, default=2)
 parser.add_argument('--eval_freq', type=int, default=2)
 parser.add_argument('--n_epochs', type=int, default=10)
+parser.add_argument('--use_ldam', action='store_true')
 parser.add_argument('--root_path')
 
 parser.add_argument('--in_data', default="cifar")
@@ -644,8 +645,10 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
 
             logits_all = loss_fn.prior.class_logits(z_all)
             logits_labeled = logits_all[labeled_mask]
-            loss_nll = F.cross_entropy(logits_labeled, y_labeled)
-            # loss_nll = sup_loss_fn(logits_labeled, y_labeled)
+            if args.use_ldam:
+                loss_nll = sup_loss_fn(logits_labeled, y_labeled)
+            else:
+                loss_nll = F.cross_entropy(logits_labeled, y_labeled)
             # print(loss_nll)
             # loss_nll = loss_nll.mean()
             # print(loss_nll)
