@@ -158,7 +158,7 @@ class Dataset():
     def prepare(self, in_data='cifar', out_data=['mnist', 'svhn', 'fashionmnist'], indata_size=5000, outdata_size=1700, label_ratio=0.2):
         # Prepare OOD data
         for k in out_data:
-            dataset = config[k]['dataset']
+            dataset = self.config[k]['dataset']
             transforms = TransformTwice(config[k]['transforms'])
             n_outlabels = int(outdata_size * label_ratio)
             dataset_ids = np.random.choice(len(dataset), outdata_size)
@@ -178,8 +178,8 @@ class Dataset():
             print(f'{k} dataset processed...')
         
         # Prepare ID data
-        dataset = config[in_data]['dataset']
-        transforms = TransformTwice(config[k]['transforms'])
+        dataset = self.config[in_data]['dataset']
+        transforms = TransformTwice(self.config[k]['transforms'])
         n_inlabels = int(indata_size * label_ratio)
         dataset_ids = np.random.choice(len(dataset), indata_size)
         dataset_labeled_ids = set(np.random.choice(dataset_ids, n_inlabels))
@@ -217,8 +217,8 @@ class SLDataset():
         print(out_data)
         # Prepare OOD data
         for k in out_data:
-            dataset = config[k]['dataset']
-            transforms = config[k]['transforms']
+            dataset = self.config[k]['dataset']
+            transforms = self.config[k]['transforms']
             for i, (img, _) in enumerate(dataset):
                 if i == outdata_size:
                     break
