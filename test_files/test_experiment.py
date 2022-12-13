@@ -36,7 +36,10 @@ import torch.nn.functional as F
 from flow_ssl.distributions import SSLGaussMixture
 from flow_ssl import FlowLoss
 from tensorboardX import SummaryWriter
+from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
+
+f = open("details.txt","a")
 
 parser = argparse.ArgumentParser(description='Run custom flow datasets for OOD')
 
@@ -63,6 +66,8 @@ in_data = args.in_data
 out_data = args.out_data.split(',')
 
 model_path = args.model_path
+
+f.write(f"Indata: {in_data} Outdata: {','.join(out_data)}\n")
 
 class SLDataset():
     def __init__(self, config: dict):
@@ -182,7 +187,6 @@ test_ds = SLDataset(test_config)
 test_ds.prepare(in_data=in_data, out_data=out_data, indata_size=indata_size, outdata_size=outdata_size)
 testloader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
 
-
 device = 'cuda' if torch.cuda.is_available() and len([0]) > 0 else 'cpu'
 img_shape = (3, 32, 32)
 flow = 'ResidualFlow'
@@ -228,6 +232,7 @@ def test(net, testloader, device, loss_fn):
     all_xs = np.vstack(all_xs)
     all_zs = np.vstack(all_zs)
     all_ys = np.hstack(all_ys)
+    return all_ys, all_pred_labels
 
 
 checkpoint = torch.load(model_path)
@@ -238,4 +243,24 @@ means = checkpoint['means']
 prior = SSLGaussMixture(means, device=device)
 loss_fn = FlowLoss(prior)
 
-test(net, testloader, "cuda", loss_fn)
+all_ys, all_pred_labels = test(net, testloader, "cuda", loss_fn)
+
+def auroc(preds, labels, pos_label=1):
+    """Calculate and return the area under the ROC curve using unthresholded predictions on the data and a binary true label.
+
+    preds: array, shape = [n_samples]
+           Target normality scores, can either be probability estimates of the positive class, confidence values, or non-thresholded measure of decisions.
+           i.e.: an high value means sample predicted "normal", belonging to the positive class
+
+    labels: array, shape = [n_samples]
+            True binary labels in range {0, 1} or {-1, 1}.
+    pos_label: label of the positive class (1 by default)
+    """
+    fpr, tpr, _ = roc_curve(labels, preds, pos_label=pos_label)
+    f.write(f"False positive Rate: {fpr}\n") 
+    f.write(f"True positive Rate:, {tpr}\n") 
+    score = auc(fpr, tpr)
+    f.write(f"AUCROC: {score}\n")
+
+auroc(all_pred_labels, all_ys)
+f.close()
