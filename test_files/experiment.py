@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 import sys
 import os
+import time
+from tabnanny import check
 import flow_ssl
-from torchvision.datasets import SVHN, MNIST, FashionMNIST, CIFAR10, CelebA, Omniglot
-from torchvision.datasets import STL10, Food101, Caltech101, GTSRB, Flowers102, KMNIST, CIFAR100
+
 
 import torchvision
-import torchvision.transforms as transforms
 import torch
 import torch.optim as optim
 from experiments.train_flows.utils import norm_util
-from torch.utils.data.sampler import Sampler
 
 
 import numpy as np
-import itertools
-import random
 import argparse
 
 import seaborn as sns
@@ -38,8 +35,9 @@ from flow_ssl.distributions import SSLGaussMixture
 from flow_ssl import FlowLoss
 from tensorboardX import SummaryWriter
 
-
-
+from datasets import TrainDataset, TestDataset
+from datasets import get_train_config, get_test_config
+from dataloaders import get_dataloaders
 
 
 parser = argparse.ArgumentParser(description='Run custom flow datasets for OOD')
@@ -51,11 +49,11 @@ parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--save_freq', type=int, default=2)
 parser.add_argument('--eval_freq', type=int, default=2)
 parser.add_argument('--n_epochs', type=int, default=10)
-parser.add_argument('--use_ldam', action='store_true')
-parser.add_argument('--root_path')
+parser.add_argument('--use_ldam', action='store_true', default=False)
+parser.add_argument('--root_path', type=str, default='/scratch/rm5708/ml/ML_Project')
 
-parser.add_argument('--in_data', default="cifar")
-parser.add_argument('--out_data', default="svhn,fashionmnist,mnist")
+parser.add_argument('--in_data', type=str, default="cifar")
+parser.add_argument('--out_data', type=str, default="svhn,fmnist,mnist")
 
 parser.add_argument('--test_out_data', default=None) #could be extra as well
 
@@ -73,405 +71,19 @@ label_ratio = args.label_ratio
 batch_size = args.batch_size
 
 in_data = args.in_data
-out_data = args.out_data.split(',')
+out_data_list = args.out_data.split(',')
+n_out_datasets = len(out_data_list)
 
 if not args.test_out_data:
-    test_out_data = out_data
+    test_out_data_list = out_data_list
 else:
-    test_out_data = args.test_out_data.split(',')
+    test_out_data_list = args.test_out_data.split(',')
 test_indata_size = args.test_indata_size
 test_outdata_size = args.test_outdata_size
 
-class LabeledUnlabeledBatchSampler(Sampler):
-    """Minibatch index sampler for labeled and unlabeled indices. 
-
-    An epoch is one pass through the labeled indices.
-    """
-    def __init__(
-            self, 
-            labeled_idx, 
-            unlabeled_idx, 
-            labeled_batch_size, 
-            unlabeled_batch_size):
-
-        self.labeled_idx = labeled_idx
-        self.unlabeled_idx = unlabeled_idx
-        self.unlabeled_batch_size = unlabeled_batch_size
-        self.labeled_batch_size = labeled_batch_size
-
-        assert len(self.labeled_idx) >= self.labeled_batch_size > 0
-        assert len(self.unlabeled_idx) >= self.unlabeled_batch_size > 0
-
-    @property
-    def num_labeled(self):
-        return len(self.labeled_idx)
-
-    def __iter__(self):
-        labeled_iter = iterate_once(self.labeled_idx)
-        unlabeled_iter = iterate_eternally(self.unlabeled_idx)
-        return (
-            labeled_batch + unlabeled_batch
-            for (labeled_batch, unlabeled_batch)
-            in  zip(batch_iterator(labeled_iter, self.labeled_batch_size),
-                    batch_iterator(unlabeled_iter, self.unlabeled_batch_size))
-        )
-
-    def __len__(self):
-        return len(self.labeled_idx) // self.labeled_batch_size
-
-
-def iterate_once(iterable):
-    return np.random.permutation(iterable)
-
-
-def iterate_eternally(indices):
-    def infinite_shuffles():
-        while True:
-            yield np.random.permutation(indices)
-    return itertools.chain.from_iterable(infinite_shuffles())
-
-
-def batch_iterator(iterable, n):
-    "Collect data into fixed-length chunks or blocks"
-    args = [iter(iterable)] * n
-    return zip(*args)
-
-
-class TransformTwice:
-    def __init__(self, transform):
-        self.transform = transform
-
-    def __call__(self, inp):
-        out1 = self.transform(inp)
-        out2 = self.transform(inp)
-        return out1, out2
-
-class Dataset():
-    def __init__(self, config):
-        self.config = config
-        self.labeled_ids = []
-        self.unlabeled_ids = []
-        self.image_tensors = []
-        self.labels = []
-        self.counter = 0
-    
-    def prepare(self, in_data='cifar', out_data=['mnist', 'svhn', 'fashionmnist'], indata_size=5000, outdata_size=1700, label_ratio=0.2):
-        # Prepare OOD data
-        for k in out_data:
-            dataset = self.config[k]['dataset']
-            transforms = TransformTwice(config[k]['transforms'])
-            n_outlabels = int(outdata_size * label_ratio)
-            dataset_ids = np.random.choice(len(dataset), outdata_size)
-            dataset_labeled_ids = set(np.random.choice(dataset_ids, n_outlabels))
-            for idx in dataset_ids:
-                img = dataset[idx][0]
-                img_tensor = transforms(img)
-                self.image_tensors.append(img_tensor)
-                if idx in dataset_labeled_ids:
-                    self.labeled_ids.append(self.counter)
-                    self.labels.append(0)
-                else:
-                    self.unlabeled_ids.append(self.counter)
-                    self.labels.append(-1)
-                self.counter += 1
-            print(len(self.labeled_ids))
-            print(f'{k} dataset processed...')
-        
-        # Prepare ID data
-        dataset = self.config[in_data]['dataset']
-        transforms = TransformTwice(self.config[k]['transforms'])
-        n_inlabels = int(indata_size * label_ratio)
-        dataset_ids = np.random.choice(len(dataset), indata_size)
-        dataset_labeled_ids = set(np.random.choice(dataset_ids, n_inlabels))
-        for idx in dataset_ids:
-            img = dataset[idx][0]
-            img_tensor = transforms(img)
-            self.image_tensors.append(img_tensor)
-            if idx in dataset_labeled_ids:
-                self.labeled_ids.append(self.counter)
-                self.labels.append(1)
-            else:
-                self.unlabeled_ids.append(self.counter)
-                self.labels.append(-1)
-            self.counter += 1
-        print(len(self.labeled_ids))
-        print(f'{in_data} dataset processed...')
-        
-        random.shuffle(self.labeled_ids)
-        random.shuffle(self.unlabeled_ids)
-    
-    def __len__(self):
-        return len(self.image_tensors)
-    
-    def __getitem__(self, idx):
-        return self.image_tensors[idx], self.labels[idx]
-
-
-class SLDataset():
-    def __init__(self, config: dict):
-        self.config = config
-        self.image_tensors = []
-        self.labels = []
-    
-    def prepare(self, in_data='cifar', out_data=['mnist', 'svhn', 'fashionmnist'], indata_size=600, outdata_size=200):
-        print(out_data)
-        # Prepare OOD data
-        for k in out_data:
-            dataset = self.config[k]['dataset']
-            transforms = self.config[k]['transforms']
-            for i, (img, _) in enumerate(dataset):
-                if i == outdata_size:
-                    break
-                img_tensor = transforms(img)
-                self.image_tensors.append(img_tensor)
-            self.labels += [0] * outdata_size
-        
-        # Prepare ID data
-        dataset = config[in_data]['dataset']
-        transforms = config[in_data]['transforms']
-        for i, (img, _) in enumerate(dataset):
-            if i == indata_size:
-                break
-            img_tensor = transforms(img)
-            self.image_tensors.append(img_tensor)
-        self.labels += [1] * indata_size
-    
-    def __len__(self):
-        return len(self.image_tensors)
-    
-    def __getitem__(self, idx):
-        return self.image_tensors[idx], self.labels[idx]
-
-# convert all images to the same size as the in-data distribution
-# in most cases it will be 3X32X32
-
-transform_to_three_channel = transforms.Lambda(lambda img: img.expand(3,*img.shape[1:]))
-
-svhn_transforms = transforms.Compose([
-                    # transforms.Grayscale(),
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel,
-                ])
-
-mnist_transforms = transforms.Compose([
-                   transforms.RandomCrop(32, padding=4),
-                   transforms.RandomHorizontalFlip(),
-                   transforms.ToTensor(),
-                   transforms.Resize((32,32)),
-                   transform_to_three_channel
-                ])
-
-fashionmnist_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-
-cifar_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-
-food_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-
-celeb_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-stl10_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-german_sign_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-caltech_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-
-flowers_transforms = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.RandomHorizontalFlip(),
-                    # transforms.Grayscale(),
-                    transforms.ToTensor(),
-                    transforms.Resize((32,32)),
-                    transform_to_three_channel
-                ])
-# load train datasets from pytorch
-
-svhn_dataset = SVHN(root=data_dir, split='train', download=True)
-mnist_dataset = MNIST(root=data_dir, download=True)
-kmnist_dataset = KMNIST(root=data_dir, download=True)
-fashionmnist_dataset = FashionMNIST(root=data_dir, download=True)
-cifar_dataset = CIFAR10(root=data_dir, download=True)
-cifar100_dataset = CIFAR100(root=data_dir, download=True)
-stl10_dataset = STL10(root=data_dir, split='train', download=True)
-food_dataset = Food101(root=data_dir, download = True)
-# celeb_dataset = CelebA(root=data_dir, download = True)
-flowers_dataset = Flowers102(root=data_dir, download = True)
-caltech_dataset = Caltech101(root=data_dir, download = True)
-german_sign_dataset = GTSRB(root=data_dir, download = True)
-omniglot_dataset = Omniglot(root=data_dir, download = True)
-
-
-
-# load test datasets from pytorch
-
-svhn_test_dataset = SVHN(root=data_dir, split='test', download=True)
-mnist_test_dataset = MNIST(root=data_dir, train=False, download=True)
-kmnist_test_dataset = KMNIST(root=data_dir, train=False, download=True)
-fashionmnist_test_dataset = FashionMNIST(root=data_dir, train=False, download=True)
-cifar_test_dataset = CIFAR10(root=data_dir, train=False, download=True)
-cifar100_test_dataset = CIFAR100(root=data_dir, train=False, download=True)
-stl10_test_dataset = STL10(root=data_dir, split='test', download=True)
-food_test_dataset = Food101(root=data_dir, split='test', download = True)
-# celeb_dataset = CelebA(root=data_dir, download = True)
-flowers_test_dataset = Flowers102(root=data_dir, split='test', download = True)
-caltech_test_dataset = Caltech101(root=data_dir, download = True)
-german_sign_test_dataset = GTSRB(root=data_dir, split='test', download = True)
-omniglot_test_dataset = Omniglot(root=data_dir, download = True)
-
-# create train config, to be used in the 
-# training dataset, composed of images from various sources
-
-config = {}
-
-config['svhn'] = {}
-config['svhn']['dataset'] = svhn_dataset
-config['svhn']['transforms'] = svhn_transforms
-
-config['mnist'] = {}
-config['mnist']['dataset'] = mnist_dataset
-config['mnist']['transforms'] = mnist_transforms
-
-config['kmnist'] = {}
-config['kmnist']['dataset'] = kmnist_dataset
-config['kmnist']['transforms'] = mnist_transforms
-
-config['fashionmnist'] = {}
-config['fashionmnist']['dataset'] = fashionmnist_dataset
-config['fashionmnist']['transforms'] = fashionmnist_transforms
-
-config['cifar'] = {}
-config['cifar']['dataset'] = cifar_dataset
-config['cifar']['transforms'] = cifar_transforms
-
-config['cifar100'] = {}
-config['cifar100']['dataset'] = cifar100_dataset
-config['cifar100']['transforms'] = cifar_transforms
-
-config['food'] = {}
-config['food']['dataset'] = food_dataset
-config['food']['transforms'] = food_transforms
-
-config['stl10'] = {}
-config['stl10']['dataset'] = stl10_dataset
-config['stl10']['transforms'] = stl10_transforms
-
-config['flowers'] = {}
-config['flowers']['dataset'] = flowers_dataset
-config['flowers']['transforms'] = flowers_transforms
-
-config['caltech'] = {}
-config['caltech']['dataset'] = caltech_dataset
-config['caltech']['transforms'] = caltech_transforms
-
-config['german_sign'] = {}
-config['german_sign']['dataset'] = german_sign_dataset
-config['german_sign']['transforms'] = german_sign_transforms
-
-config['omniglot'] = {}
-config['omniglot']['dataset'] = omniglot_dataset
-config['omniglot']['transforms'] = german_sign_transforms
-
-# write test_config, to be used in the test data
-
-test_config = {}
-
-test_config['svhn'] = {}
-test_config['svhn']['dataset'] = svhn_test_dataset
-test_config['svhn']['transforms'] = svhn_transforms
-
-test_config['mnist'] = {}
-test_config['mnist']['dataset'] = mnist_test_dataset
-test_config['mnist']['transforms'] = mnist_transforms
-
-test_config['kmnist'] = {}
-test_config['kmnist']['dataset'] = kmnist_test_dataset
-test_config['kmnist']['transforms'] = mnist_transforms
-
-test_config['fashionmnist'] = {}
-test_config['fashionmnist']['dataset'] = fashionmnist_test_dataset
-test_config['fashionmnist']['transforms'] = fashionmnist_transforms
-
-test_config['cifar'] = {}
-test_config['cifar']['dataset'] = cifar_test_dataset
-test_config['cifar']['transforms'] = cifar_transforms
-
-test_config['cifar100'] = {}
-test_config['cifar100']['dataset'] = cifar100_test_dataset
-test_config['cifar100']['transforms'] = cifar_transforms
-
-test_config['food'] = {}
-test_config['food']['dataset'] = food_test_dataset
-test_config['food']['transforms'] = food_transforms
-
-test_config['stl10'] = {}
-test_config['stl10']['dataset'] = stl10_test_dataset
-test_config['stl10']['transforms'] = stl10_transforms
-
-test_config['flowers'] = {}
-test_config['flowers']['dataset'] = flowers_test_dataset
-test_config['flowers']['transforms'] = flowers_transforms
-
-test_config['caltech'] = {}
-test_config['caltech']['dataset'] = caltech_test_dataset
-test_config['caltech']['transforms'] = caltech_transforms
-
-test_config['german_sign'] = {}
-test_config['german_sign']['dataset'] = german_sign_test_dataset
-test_config['german_sign']['transforms'] = german_sign_transforms
-
-test_config['omniglot'] = {}
-test_config['omniglot']['dataset'] = omniglot_test_dataset
-test_config['omniglot']['transforms'] = german_sign_transforms
-
 # define LDAM loss for skewed data
 
-cls_num_list = [outdata_size, indata_size]
+cls_num_list = [outdata_size * n_out_datasets, indata_size]
 
 class LDAMLoss(nn.Module):
     
@@ -499,47 +111,20 @@ class LDAMLoss(nn.Module):
 
 # create custom train and test dataset based on our config
 
-# out_data = ['mnist', 'svhn', 'fashionmnist', 'stl10','food', 'caltech','flowers','german_sign']
+train_config = get_train_config(in_data=in_data, out_data_list=out_data_list, root_dir=data_dir)
+test_config = get_test_config(in_data=in_data, out_data_list=out_data_list, root_dir=data_dir)
 
-ds = Dataset(config)
-ds.prepare(in_data=in_data, out_data=out_data, indata_size=indata_size, outdata_size=outdata_size, label_ratio=label_ratio)
+train_dataset = TrainDataset(train_config)
+train_dataset.prepare(indata_size=indata_size, outdata_size=outdata_size, label_ratio=label_ratio)
 
-test_ds = SLDataset(test_config)
-test_ds.prepare(in_data=in_data, out_data=test_out_data, indata_size=test_indata_size, outdata_size=test_outdata_size)
+test_dataset = TestDataset(test_config)
+test_dataset.prepare(indata_size=test_indata_size, outdata_size=test_outdata_size)
 
 
 # create dataloaders for train and test dataset
+trainloader, testloader = get_dataloaders(train_dataset, test_dataset, args.batch_size)
+total_labels = len(train_dataset.labeled_ids)
 
-train_batch_sampler = LabeledUnlabeledBatchSampler(ds.labeled_ids, ds.unlabeled_ids, batch_size//2, batch_size//2)
-trainloader = torch.utils.data.DataLoader(ds, batch_sampler=train_batch_sampler, pin_memory=True)
-testloader = torch.utils.data.DataLoader(test_ds, batch_size, shuffle=True, pin_memory=True)
-
-total_labels = len(ds.labeled_ids)
-# test dataloaders
-
-for batch in trainloader:
-    print(batch[0][0].shape)
-    print(batch[0][1].shape)
-    print(batch[1].shape)
-    break
-
-for batch in testloader:
-    print(len(batch))
-    print(batch[0].get_device())
-    print(batch[0].shape)
-    print(batch[1].shape)
-    break
-
-
-# decide based on channels of dataset
-
-#if in_data in ['mnist','fashionmnist','svhn']:
-#    img_shape = (1, 32, 32)
-#    flow = 'MNISTResidualFlow'
-#    model_cfg = getattr(flow_ssl, flow)
-#    net = model_cfg(in_channels=img_shape[0], num_classes=2)
-
-#else:
 img_shape = (3, 32, 32)
 flow = 'ResidualFlow'
 model_cfg = getattr(flow_ssl, flow)
@@ -568,11 +153,7 @@ cov_std = cov_std.to(device)
 means = train_utils.get_means(means, num_means=n_classes, r=means_r, trainloader=trainloader, 
                         shape=img_shape, device=device, net=net)
 means_init = means.clone().detach()
-
-#print("Means:", means)
-#print("Cov std:", cov_std)
 means_np = means.cpu().numpy()
-#print("Pairwise dists:", cdist(means_np, means_np))
 
 means_trainable = True
 covs_trainable = True
@@ -588,15 +169,29 @@ prior.inv_cov_stds.requires_grad = covs_trainable
 loss_fn = FlowLoss(prior)
 sup_loss_fn = LDAMLoss(cls_num_list, s=15)
 
-
 param_groups = norm_util.get_param_groups(net, 0.0, norm_suffix='weight_g')
 optimizer = optim.Adam(param_groups, lr=5e-4, weight_decay=1e-2)
 opt_gmm = optim.Adam([prior.means, prior.weights, prior.inv_cov_stds], lr=1e-4, weight_decay=1e-2)
 
-log_directory = f'./{in_data}_{",".join(out_data)}_{label_ratio}'
-print(log_directory)
-os.mkdir(log_directory)
-writer = SummaryWriter(log_dir=log_directory)
+base_dir = './out/'
+timestr = time.strftime('%Y%m%d-%H%M%S')
+trial_dir = f'./{in_data}_{"_".join(out_data_list)}_{label_ratio}_' + timestr
+save_dir = os.path.join(base_dir, trial_dir)
+log_dir = os.path.join(save_dir, 'logs')
+checkpoint_dir = os.path.join(save_dir, 'checkpoints')
+
+if not os.path.exists(save_dir):
+    print(f'Creating {save_dir} directory')
+    os.mkdir(save_dir)
+    print(f'Creating {log_dir} directory')
+    os.mkdir(log_dir)
+    print(f'Creating {checkpoint_dir} directory')
+    os.mkdir(checkpoint_dir)
+else:
+    print(f'Directory {save_dir} already exists')
+    exit()
+
+writer = SummaryWriter(log_dir=log_dir)
 device = 'cuda' if torch.cuda.is_available() and len([0]) > 0 else 'cpu'
 start_epoch = 0
 
@@ -618,7 +213,7 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
     jaclogdet_meter = shell_util.AverageMeter()
     acc_meter = shell_util.AverageMeter()
     acc_all_meter = shell_util.AverageMeter()
-    with tqdm(total=2*total_labels) as progress_bar:
+    with tqdm(total=total_labels) as progress_bar:
         for (x1, x2), y in trainloader:
 
             x1 = x1.to(device)
@@ -833,7 +428,7 @@ consistency_rampup = 1
 label_weight = 1.0
 max_grad_norm = 100.0
 # need to feed this as args
-ckptdir = f'./{in_data}_{",".join(out_data)}_{label_ratio}'
+ckptdir = checkpoint_dir
 save_freq = args.save_freq
 eval_freq = args.eval_freq
 confusion = True
