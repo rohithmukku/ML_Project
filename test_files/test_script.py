@@ -1,18 +1,17 @@
 import os
 
 experiments = {}
-experiments["svhn"] = "omniglot,mnist,german_sign"
-experiments["fashionmnist"] = "mnist,kmnist,omniglot"
-experiments["mnist"] = "kmnist,omniglot,svhn"
+#experiments["svhn"] = ["cifar","mnist"]
+#experiments["fashionmnist"] = "mnist,kmnist,omniglot"
+experiments["mnist"] = ["omniglot","fashionmnist"]
 #experiment["cifar"] = ["svhn","flowers","food"]
 
 paths = {}
 paths["svhn"] = "svhn_mnist,fashionmnist,cifar100,food,flowers,german_sign,caltech_0.1/48.pt"
 paths["cifar"] = "svhn_mnist,fashionmnist,cifar100,food,flowers,german_sign,caltech_0.1/48.pt"
 paths["fashionmnist"] = "fashionmnist_kmnist,svhn,mnist,cifar,cifar100,food,flowers,german_sign_0.1/28.pt"
-paths["mnist"] = "mnist_fashionmnist,cifar100,food,flowers,german_sign,caltech,stl10_0.1/8.pt"
-
-for experiment in experiments:
-    print(experiment, experiments[experiment])
-    command = f"python -W ignore test_experiment.py --root_path=/scratch/gg2501/ML_Project/ --model_path={paths[experiment]} --in_data={experiment}  --out_data={experiments[experiment]} --indata_size=9000 --outdata_size=3000"
-    os.system(command)
+paths["mnist"] = "mnist_kmnist,svhn,food,flowers,german_sign,svhn,caltech_0.1/26.pt"
+for in_data in experiments:
+    for out_data in experiments[in_data]:
+        command = f"python -W ignore test_experiment.py --root_path=/scratch/gg2501/ML_Project/ --model_path={paths[in_data]} --in_data={in_data}  --out_data={out_data} --indata_size=9000 --outdata_size=9000"
+        os.system(command)
