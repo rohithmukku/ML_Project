@@ -38,7 +38,9 @@ from tensorboardX import SummaryWriter
 from datasets import TrainDataset, TestDataset
 from datasets import get_train_config, get_test_config
 from dataloaders import get_dataloaders
+from test import test_experiments
 
+flow_types = ["iCNN3d", "iResnetProper","SmallResidualFlow", "MediumResidualFlow","ResidualFlow","MNISTResidualFlow"]
 
 parser = argparse.ArgumentParser(description='Run custom flow datasets for OOD')
 
@@ -51,14 +53,15 @@ parser.add_argument('--eval_freq', type=int, default=2)
 parser.add_argument('--n_epochs', type=int, default=10)
 parser.add_argument('--use_ldam', action='store_true', default=False)
 parser.add_argument('--root_path', type=str, default='/scratch/rm5708/ml/ML_Project')
+parser.add_argument('--flow', type=str, default='SmallResidualFlow', choices=flow_types)
 
 parser.add_argument('--in_data', type=str, default="cifar")
 parser.add_argument('--out_data', type=str, default="svhn,fmnist,mnist")
 
 parser.add_argument('--test_out_data', default=None) #could be extra as well
-
 parser.add_argument('--test_indata_size', type=int, default=900)
 parser.add_argument('--test_outdata_size', type=int, default=300)
+parser.add_argument('--data_size', type=int, default=2000)
 
 args = parser.parse_args()
 
@@ -126,11 +129,11 @@ trainloader, testloader = get_dataloaders(train_dataset, test_dataset, args.batc
 total_labels = len(train_dataset.labeled_ids)
 
 img_shape = (3, 32, 32)
-flow = 'ResidualFlow'
+flow = args.flow
 model_cfg = getattr(flow_ssl, flow)
 net = model_cfg(in_channels=img_shape[0], num_classes=2)
 
-if flow in ["iCNN3d", "iResnetProper","SmallResidualFlow","ResidualFlow","MNISTResidualFlow"]:
+if flow in flow_types:
     net = net.flow
 
 print(args)
@@ -213,6 +216,7 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
     jaclogdet_meter = shell_util.AverageMeter()
     acc_meter = shell_util.AverageMeter()
     acc_all_meter = shell_util.AverageMeter()
+    log_probs = []
     with tqdm(total=total_labels) as progress_bar:
         for (x1, x2), y in trainloader:
 
@@ -225,17 +229,13 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
                 y_all_lab = y_all_lab.to(device)
 
             labeled_mask = (y != NO_LABEL)
+            indist_mask = (y == 1)
 
             optimizer.zero_grad()
             opt_gmm.zero_grad()
 
             with torch.no_grad():
                 x2 = x2.to(device)
-                # z21 = net(x2)
-                # z22 = net(transform(x2))
-                # y22 = classify(z22)
-                # l_cons = FlowLoss(z21, y22)
-                # print(x2.get_device(), next(net.parameters()).is_cuda)
                 z2 = net(x2)
                 z2 = z2.detach()
                 pred2 = loss_fn.prior.classify(z2.reshape((len(z2), -1)))
@@ -245,6 +245,8 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
 
             z_all = z1.reshape((len(z1), -1))
             z_labeled = z_all[labeled_mask]
+            z_indist = z_all[indist_mask]
+            log_probs.append(loss_fn.prior.class_logits(z_indist).cpu().data.numpy())
             y_labeled = y[labeled_mask]
 
             logits_all = loss_fn.prior.class_logits(z_all)
@@ -253,13 +255,9 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
                 loss_nll = sup_loss_fn(logits_labeled, y_labeled)
             else:
                 loss_nll = F.cross_entropy(logits_labeled, y_labeled)
-            # print(loss_nll)
-            # loss_nll = loss_nll.mean()
-            # print(loss_nll)
 
             if use_unlab:
                 loss_unsup = loss_fn(z1, sldj=sldj)
-                # print(loss_unsup)
                 loss = loss_nll * label_weight + loss_unsup
             else:
                 loss_unsup = torch.tensor([0.])
@@ -296,6 +294,7 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
                                      acc_all=acc_all_meter.avg)
             progress_bar.update(y_labeled.size(0))
 
+    log_probs = np.concatenate((log_probs))
     x1_img = torchvision.utils.make_grid(x1[:10], nrow=2 , padding=2, pad_value=255)
     x2_img = torchvision.utils.make_grid(x2[:10], nrow=2 , padding=2, pad_value=255)
     writer.add_image("data/x1", x1_img)
@@ -309,6 +308,10 @@ def train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
     writer.add_scalar("train/acc_all", acc_all_meter.avg, epoch)
     writer.add_scalar("train/bpd", optim_util.bits_per_dim(x1, loss_unsup_meter.avg), epoch)
     writer.add_scalar("train/loss_consistency", loss_consistency_meter.avg, epoch)
+    writer.add_histogram('Train In-Distribution (Class 0)', log_probs[:,0])
+    writer.add_histogram('Train In-Distribution (Class 1)', log_probs[:,1])
+
+    return log_probs
 
 
 def test_classifier(epoch, net, testloader, device, loss_fn, writer=None, postfix="",
@@ -433,7 +436,7 @@ save_freq = args.save_freq
 eval_freq = args.eval_freq
 confusion = True
 num_samples = 50
-
+train_log_probs = None
 
 for epoch in range(start_epoch, n_epochs):
     cons_weight = linear_rampup(consistency_weight, epoch, consistency_rampup, start_epoch)
@@ -442,7 +445,7 @@ for epoch in range(start_epoch, n_epochs):
     writer.add_scalar("hypers/learning_rate_gmm", lr_gmm, epoch)
     writer.add_scalar("hypers/consistency_weight", cons_weight, epoch)
 
-    train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
+    train_log_probs = train(epoch, net, trainloader, device, optimizer, opt_gmm, loss_fn,
           label_weight, max_grad_norm, cons_weight,
           writer, sup_loss_fn, use_unlab=True)
 
@@ -506,3 +509,12 @@ for epoch in range(start_epoch, n_epochs):
         os.makedirs(ckptdir, exist_ok=True)
         torchvision.utils.save_image(images_concat, 
                                     os.path.join(ckptdir, 'samples/epoch_{}.png'.format(epoch)))
+
+in_log_probs, out_log_probs = test_experiments(data_dir, in_data, test_out_data_list,
+                                               args.data_size, batch_size, net,
+                                               prior.means, writer)
+
+out_name = '_'.join(test_out_data_list)
+np_filename = os.path.join(log_dir, f'{in_data}_{out_name}')
+np.savez(np_filename, train_log_probs=train_log_probs, in_log_probs=in_log_probs, out_log_probs=out_log_probs)
+print("Saved log probs in log directory")
