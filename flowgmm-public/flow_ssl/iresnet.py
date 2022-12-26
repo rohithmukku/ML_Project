@@ -36,8 +36,12 @@ def iResBlockLinear(outer_channels,inner_channels):
     return iSequential(iResBlock(gnet,n_dist='poisson'),ActNorm1d(outer_channels))
 
 @export
-def SmallResidualFlow(in_channels):
-    return ResidualFlow(in_channels,k=96,num_per_block=8)
+def SmallResidualFlow(in_channels, num_classes):
+    return ResidualFlow(in_channels, num_classes = num_classes, k = 96, num_per_block = 8)
+
+@export
+def MediumResidualFlow(in_channels, num_classes):
+    return ResidualFlow(in_channels, num_classes = num_classes, k = 128, num_per_block = 8)
 
 @export
 class ResidualFlow(FlowNetwork):

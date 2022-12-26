@@ -61,7 +61,7 @@ parser.add_argument('--out_data', type=str, default="svhn,fmnist,mnist")
 parser.add_argument('--test_out_data', default=None) #could be extra as well
 parser.add_argument('--test_indata_size', type=int, default=900)
 parser.add_argument('--test_outdata_size', type=int, default=300)
-parser.add_argument('--data_size', type=int, default=2000)
+parser.add_argument('--test_data_size', type=int, default=2000)
 
 args = parser.parse_args()
 
@@ -394,8 +394,8 @@ def test_classifier(epoch, net, testloader, device, loss_fn, writer=None, postfi
             conf_img = torch.tensor(np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep=''))
             conf_img = torch.tensor(conf_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))).transpose(0, 2).transpose(1, 2)
             writer.add_image("confusion", conf_img, epoch)
-
-
+        
+    return acc_meter.avg
 
 def linear_rampup(final_value, epoch, num_epochs, start_epoch=0):
     t = (epoch - start_epoch + 1) / num_epochs
@@ -437,6 +437,7 @@ eval_freq = args.eval_freq
 confusion = True
 num_samples = 50
 train_log_probs = None
+best_acc = 0.0
 
 for epoch in range(start_epoch, n_epochs):
     cons_weight = linear_rampup(consistency_weight, epoch, consistency_rampup, start_epoch)
@@ -462,7 +463,16 @@ for epoch in range(start_epoch, n_epochs):
 
     # Save samples and data
     if epoch % eval_freq == 0:
-        test_classifier(epoch, net, testloader, device, loss_fn, writer, confusion=confusion)
+        test_acc = test_classifier(epoch, net, testloader, device, loss_fn, writer, confusion=confusion)
+        if test_acc > best_acc:
+            best_acc = test_acc
+            state = {
+                'net': net.state_dict(),
+                'epoch': epoch,
+                'means': prior.means
+            }
+            os.makedirs(ckptdir, exist_ok=True)
+            torch.save(state, os.path.join(ckptdir, 'best_net.pt'))
         # if args.swa:
         #     optimizer.swap_swa_sgd() 
         #     print("updating bn")
@@ -510,8 +520,14 @@ for epoch in range(start_epoch, n_epochs):
         torchvision.utils.save_image(images_concat, 
                                     os.path.join(ckptdir, 'samples/epoch_{}.png'.format(epoch)))
 
+
+best_net_path = os.path.join(checkpoint_dir, 'best_net.pt')
+print('Loading from checkpoint at', best_net_path)
+state_dict = torch.load(best_net_path)
+net.load_state_dict(state_dict['net'])
+
 in_log_probs, out_log_probs = test_experiments(data_dir, in_data, test_out_data_list,
-                                               args.data_size, batch_size, net,
+                                               args.test_data_size, batch_size, net,
                                                prior.means, writer)
 
 out_name = '_'.join(test_out_data_list)
